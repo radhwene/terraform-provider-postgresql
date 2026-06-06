@@ -2,7 +2,9 @@ package postgresql
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -284,7 +286,8 @@ func (c *Client) Connect() (*DBConnection, error) {
 	defer dbRegistryLock.Unlock()
 
 	dsn := c.config.connStr(c.databaseName)
-	conn, found := dbRegistry[dsn]
+	registryKey := dsnRegistryKey(dsn)
+	conn, found := dbRegistry[registryKey]
 	if !found {
 
 		var db *sql.DB
@@ -301,8 +304,7 @@ func (c *Client) Connect() (*DBConnection, error) {
 			err = db.Ping()
 		}
 		if err != nil {
-			errString := strings.Replace(err.Error(), c.config.Password, "XXXX", 2)
-			return nil, fmt.Errorf("error connecting to PostgreSQL server %s (scheme: %s): %s", c.config.Host, c.config.Scheme, errString)
+			return nil, fmt.Errorf("error connecting to PostgreSQL server %s (scheme: %s): %s", c.config.Host, c.config.Scheme, sanitizeConnError(err.Error(), c.config.Password))
 		}
 
 		// We don't want to retain connection
@@ -327,7 +329,7 @@ func (c *Client) Connect() (*DBConnection, error) {
 			c,
 			*version,
 		}
-		dbRegistry[dsn] = conn
+		dbRegistry[registryKey] = conn
 	}
 
 	return conn, nil
@@ -357,6 +359,24 @@ func fingerprintCapabilities(db *sql.DB) (*semver.Version, error) {
 	}
 
 	return &version, nil
+}
+
+// dsnRegistryKey returns a SHA-256 hash of the DSN so credentials are never
+// stored as map keys where they could be exposed by debug tooling.
+func dsnRegistryKey(dsn string) string {
+	h := sha256.Sum256([]byte(dsn))
+	return hex.EncodeToString(h[:])
+}
+
+// sanitizeConnError removes plaintext and URL-encoded forms of the password
+// from a driver error message before it is returned to the caller.
+func sanitizeConnError(errMsg, password string) string {
+	if password == "" {
+		return errMsg
+	}
+	out := strings.ReplaceAll(errMsg, password, "XXXX")
+	out = strings.ReplaceAll(out, url.PathEscape(password), "XXXX")
+	return out
 }
 
 func openImpersonatedGCPDBConnection(ctx context.Context, dsn string, targetServiceAccountEmail string) (*sql.DB, error) {

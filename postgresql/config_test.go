@@ -1,6 +1,8 @@
 package postgresql
 
 import (
+	"fmt"
+	"net/url"
 	"reflect"
 	"sort"
 	"strings"
@@ -8,6 +10,78 @@ import (
 
 	"github.com/blang/semver"
 )
+
+func TestSanitizeConnError(t *testing.T) {
+	specialPassword := "my@pass!"
+	// url.PathEscape encodes '@' but leaves RFC 3986 sub-delimiters like '!' unencoded.
+	encodedSpecialPassword := url.PathEscape(specialPassword)
+
+	tests := []struct {
+		name     string
+		errMsg   string
+		password string
+		want     string
+	}{
+		{
+			name:     "replaces plaintext password",
+			errMsg:   "dial tcp: connection refused (password=secret123)",
+			password: "secret123",
+			want:     "dial tcp: connection refused (password=XXXX)",
+		},
+		{
+			name:     "replaces URL-encoded password with special chars",
+			errMsg:   fmt.Sprintf("failed to connect: postgres://user:%s@host/db", encodedSpecialPassword),
+			password: specialPassword,
+			want:     "failed to connect: postgres://user:XXXX@host/db",
+		},
+		{
+			name:     "replaces both raw and encoded occurrences",
+			errMsg:   fmt.Sprintf("error: %s and %s", specialPassword, encodedSpecialPassword),
+			password: specialPassword,
+			want:     "error: XXXX and XXXX",
+		},
+		{
+			name:     "empty password leaves message unchanged",
+			errMsg:   "some error without credentials",
+			password: "",
+			want:     "some error without credentials",
+		},
+		{
+			name:     "no match leaves message unchanged",
+			errMsg:   "role does not exist",
+			password: "secret",
+			want:     "role does not exist",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeConnError(tt.errMsg, tt.password)
+			if got != tt.want {
+				t.Errorf("sanitizeConnError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDsnRegistryKey(t *testing.T) {
+	dsn1 := "postgres://user:secret@host:5432/db"
+	dsn2 := "postgres://user:other@host:5432/db"
+
+	key1a := dsnRegistryKey(dsn1)
+	key1b := dsnRegistryKey(dsn1)
+	key2 := dsnRegistryKey(dsn2)
+
+	if key1a != key1b {
+		t.Errorf("dsnRegistryKey is not deterministic: %q != %q", key1a, key1b)
+	}
+	if key1a == key2 {
+		t.Error("different DSNs produced the same registry key")
+	}
+	if strings.Contains(key1a, "secret") || strings.Contains(key1a, "user") {
+		t.Errorf("registry key contains credentials: %q", key1a)
+	}
+}
 
 func TestConfigConnParams(t *testing.T) {
 	var tests = []struct {

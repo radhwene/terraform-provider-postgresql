@@ -807,7 +807,8 @@ func setRolePassword(txn *sql.Tx, d *schema.ResourceData) error {
 
 	sql := fmt.Sprintf("ALTER ROLE %s PASSWORD '%s'", pq.QuoteIdentifier(roleName), pqQuoteLiteral(password))
 	if _, err := txn.Exec(sql); err != nil {
-		return fmt.Errorf("error updating role password: %w", err)
+		// Sanitize the error to prevent the password from leaking via the driver error message.
+		return fmt.Errorf("error updating role password for %s: %s", roleName, sanitizeConnError(err.Error(), password))
 	}
 
 	return nil
